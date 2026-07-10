@@ -160,6 +160,12 @@ def run_automation(target_url, numbers_file):
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--headless=new")
         options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--single-process")
+        options.add_argument("--no-zygote")
+        options.add_argument("--disable-setuid-sandbox")
 
         from webdriver_manager.chrome import ChromeDriverManager
         from selenium.webdriver.chrome.service import Service
