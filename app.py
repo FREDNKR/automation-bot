@@ -30,8 +30,13 @@ def run():
     url = request.form.get("url", "https://www.luckywin.com.gh/login")
 
     def run_task():
-        result = run_automation(url, file_path)
-        print(result)
+        try:
+            result = run_automation(url, file_path)
+            print(result)
+        except Exception as e:
+            import traceback
+            print(f"❌ Automation crashed: {e}")
+            traceback.print_exc()
 
     thread = threading.Thread(target=run_task)
     thread.start()
@@ -40,4 +45,5 @@ def run():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
