@@ -1,3 +1,5 @@
-flask
+Flask
 selenium
 webdriver-manager
+gunicorn
+requests
