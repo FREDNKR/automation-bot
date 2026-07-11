@@ -307,4 +307,4 @@ def run_automation(target_url, numbers_file):
         return f"Critical Error: {e}"
     finally:
         if driver:
-            driver.quit()s
+            driver.quit()
