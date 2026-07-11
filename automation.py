@@ -189,7 +189,6 @@ def run_automation(target_url, numbers_file):
     driver = None
     debug_dir = "debug_output"
     os.makedirs(debug_dir, exist_ok=True)
-    RESTART_EVERY = 20  # restart the browser after this many numbers to keep memory in check
 
     try:
         driver = start_driver()
@@ -202,16 +201,6 @@ def run_automation(target_url, numbers_file):
 
         for i, num in enumerate(numbers, 1):
             print(f"\n[{i}/{len(numbers)}] Processing: {num}")
-
-            # Periodically restart the browser to release accumulated memory
-            if i > 1 and (i - 1) % RESTART_EVERY == 0:
-                print(f"   🔄 Restarting browser after {i - 1} numbers to free up memory...")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-                driver = start_driver()
-                wait = WebDriverWait(driver, 15)
 
             max_attempts = 3
             succeeded = False
@@ -305,22 +294,7 @@ def run_automation(target_url, numbers_file):
                         driver.switch_to.default_content()
                         driver.save_screenshot(os.path.join(debug_dir, f"error_{num}_attempt{attempt}.png"))
                     except Exception:
-                        pass  # driver may already be dead (crashed) - can't screenshot
-
-                    # The browser may have crashed or disconnected. Restart it fresh
-                    # before the next attempt/number so a dead session doesn't take
-                    # down the rest of the batch.
-                    print("   🔄 Restarting browser after failure...")
-                    try:
-                        driver.quit()
-                    except Exception:
                         pass
-                    try:
-                        driver = start_driver()
-                        wait = WebDriverWait(driver, 15)
-                    except Exception as restart_err:
-                        print(f"   ❌ Failed to restart browser: {restart_err}")
-
                     time.sleep(3)  # brief pause before retrying
 
             if not succeeded:
@@ -333,4 +307,4 @@ def run_automation(target_url, numbers_file):
         return f"Critical Error: {e}"
     finally:
         if driver:
-            driver.quit()
+            driver.quit()s
