@@ -189,6 +189,7 @@ def run_automation(target_url, numbers_file):
     driver = None
     debug_dir = "debug_output"
     os.makedirs(debug_dir, exist_ok=True)
+    RESTART_EVERY = 10  # restart the browser after this many numbers to free RAM/CPU
 
     try:
         driver = start_driver()
@@ -201,6 +202,20 @@ def run_automation(target_url, numbers_file):
 
         for i, num in enumerate(numbers, 1):
             print(f"\n[{i}/{len(numbers)}] Processing: {num}")
+
+            # Periodically restart the browser to release accumulated RAM/CPU,
+            # then keep going with the next batch of numbers.
+            if i > 1 and (i - 1) % RESTART_EVERY == 0:
+                print(f"   🔄 Restarting browser after {i - 1} numbers to free up memory...")
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                try:
+                    driver = start_driver()
+                    wait = WebDriverWait(driver, 15)
+                except Exception as restart_err:
+                    print(f"   ❌ Failed to restart browser: {restart_err}")
 
             max_attempts = 3
             succeeded = False
