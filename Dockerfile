@@ -31,10 +31,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+ENV PYTHONUNBUFFERED=1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
 # Render provides the PORT env var; gunicorn binds to it
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 120 app:app
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 120 --enable-stdio-inheritance app:app
