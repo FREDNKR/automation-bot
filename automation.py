@@ -217,7 +217,7 @@ def run_automation(target_url, numbers_file):
                 except Exception as restart_err:
                     print(f"   ❌ Failed to restart browser: {restart_err}")
 
-            max_attempts = 3
+            max_attempts = 1
             succeeded = False
 
             for attempt in range(1, max_attempts + 1):
