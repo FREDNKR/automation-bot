@@ -176,6 +176,14 @@ def start_driver():
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
 
+    # Give every individual Selenium command (click, find_element, etc.) a hard
+    # timeout. Without this, if Chrome ever freezes/goes unresponsive without
+    # fully crashing, a command can hang forever with no error at all.
+    try:
+        driver.command_executor.set_timeout(30)
+    except Exception:
+        pass
+
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
