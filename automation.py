@@ -12,6 +12,23 @@ from selenium.common.exceptions import (
 )
 import time
 import os
+import concurrent.futures
+import threading
+
+
+def safe_quit(driver):
+    """
+    Calls driver.quit() in a background thread and does not wait for it.
+    A frozen/unresponsive Chrome can make quit() itself hang forever;
+    this ensures cleanup never blocks the main automation loop.
+    """
+    def _quit():
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    t = threading.Thread(target=_quit, daemon=True)
+    t.start()
 
 
 # ----------------------------------------------------------------------
@@ -193,11 +210,95 @@ def start_driver():
     return driver
 
 
+def process_one_number(driver, wait, target_url, num, debug_dir):
+    """
+    Runs the full flow (login -> popup -> daily coins -> sign in) for a
+    single number. Raises an exception on any failure. Returns nothing on
+    success (reaching this point without an exception = success).
+    """
+    driver.get(target_url)
+    time.sleep(5)
+
+    # === Login ===
+    mobile = wait.until(EC.presence_of_element_located(
+        (By.CSS_SELECTOR, "input[type='tel'], input[placeholder*='mobile'], input:nth-of-type(1)")))
+    mobile.clear()
+    mobile.send_keys(num)
+
+    password = wait.until(EC.presence_of_element_located(
+        (By.CSS_SELECTOR, "input[type='password'], input[placeholder*='password'], input:nth-of-type(2)")))
+    password.clear()
+    password.send_keys(num)
+
+    login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button")))
+    robust_click(driver, login_btn)
+    print("   Login clicked")
+
+    time.sleep(6)
+
+    # === Dismiss any popup (X/close button) that blocks the Daily coins button ===
+    print("   Checking for a popup to close...")
+    dismiss_close_popup(driver, wait, timeout=6)
+
+    # === Daily coins button ===
+    print("   Looking for 'Daily coins' button...")
+    daily_xpaths = [
+        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'daily coin')]",
+        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'daily coin')]",
+        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
+        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
+        "//*[@role='button'][contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
+    ]
+    daily_btn, _ = find_in_page_or_frames(driver, wait, daily_xpaths, timeout=15)
+    if daily_btn is None:
+        raise TimeoutException("Could not locate 'Daily coins' button")
+
+    robust_click(driver, daily_btn)
+    print("   ✅ Clicked 'Daily coins'!")
+
+    # Give the popup time to animate/render fully.
+    time.sleep(4)
+
+    # === Sign In (inside popup, possibly inside an iframe) ===
+    sign_xpaths = [
+        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
+        "//*[@role='button'][contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
+        "//a[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
+        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
+    ]
+
+    sign_btn, frame_ctx = find_in_page_or_frames(driver, wait, sign_xpaths, timeout=12)
+
+    if sign_btn is None:
+        # Save diagnostics so you can see exactly what the popup looked like.
+        shot_path = os.path.join(debug_dir, f"popup_not_found_{num}.png")
+        html_path = os.path.join(debug_dir, f"popup_not_found_{num}.html")
+        driver.switch_to.default_content()
+        driver.save_screenshot(shot_path)
+        with open(html_path, "w", encoding="utf-8") as hf:
+            hf.write(driver.page_source)
+        raise TimeoutException(
+            f"Could not locate 'Sign In' button. Saved {shot_path} and {html_path} for inspection."
+        )
+
+    # If the element was in an iframe, driver context is already
+    # switched into that frame by find_in_page_or_frames since it
+    # only switches back to default on failure paths.
+    success = robust_click(driver, sign_btn)
+    driver.switch_to.default_content()
+
+    if not success:
+        raise ElementClickInterceptedException("Sign In click failed after all fallback strategies")
+
+    print("   ✅ Clicked Sign In!")
+
+
 def run_automation(target_url, numbers_file):
     driver = None
     debug_dir = "debug_output"
     os.makedirs(debug_dir, exist_ok=True)
     RESTART_EVERY = 10  # restart the browser after this many numbers to free RAM/CPU
+    PER_NUMBER_HARD_TIMEOUT = 60  # seconds - if a number takes longer than this, abandon it and force a new browser
 
     try:
         driver = start_driver()
@@ -215,113 +316,45 @@ def run_automation(target_url, numbers_file):
             # then keep going with the next batch of numbers.
             if i > 1 and (i - 1) % RESTART_EVERY == 0:
                 print(f"   🔄 Restarting browser after {i - 1} numbers to free up memory...")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                safe_quit(driver)
                 try:
                     driver = start_driver()
                     wait = WebDriverWait(driver, 15)
                 except Exception as restart_err:
                     print(f"   ❌ Failed to restart browser: {restart_err}")
 
-            max_attempts = 1
-            succeeded = False
-
-            for attempt in range(1, max_attempts + 1):
-                if attempt > 1:
-                    print(f"   🔁 Retry attempt {attempt}/{max_attempts} for {num}...")
-
+            # Run this number's flow in a worker thread with a hard wall-clock
+            # timeout. If Chrome freezes (stops responding without crashing),
+            # a normal call can hang forever with no error. Running it in a
+            # separate thread lets us give up after PER_NUMBER_HARD_TIMEOUT
+            # seconds and force a brand new browser, even if the frozen
+            # thread/connection never actually returns.
+            # NOTE: not using "with executor" here on purpose - the context
+            # manager's shutdown(wait=True) would itself block waiting for a
+            # frozen thread, which defeats the whole point of the timeout.
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(process_one_number, driver, wait, target_url, num, debug_dir)
+            try:
+                future.result(timeout=PER_NUMBER_HARD_TIMEOUT)
+                print(f"   ✅ {num} completed successfully.")
+                executor.shutdown(wait=False)
+            except concurrent.futures.TimeoutError:
+                print(f"   ⏱️ {num} timed out after {PER_NUMBER_HARD_TIMEOUT}s (browser likely frozen). Forcing a new browser...")
+                executor.shutdown(wait=False)  # abandon the stuck thread, don't wait for it
+                safe_quit(driver)
                 try:
-                    driver.get(target_url)
-                    time.sleep(5)
-
-                    # === Login ===
-                    mobile = wait.until(EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "input[type='tel'], input[placeholder*='mobile'], input:nth-of-type(1)")))
-                    mobile.clear()
-                    mobile.send_keys(num)
-
-                    password = wait.until(EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "input[type='password'], input[placeholder*='password'], input:nth-of-type(2)")))
-                    password.clear()
-                    password.send_keys(num)
-
-                    login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button")))
-                    robust_click(driver, login_btn)
-                    print("   Login clicked")
-
-                    time.sleep(6)
-
-                    # === Dismiss any popup (X/close button) that blocks the Daily coins button ===
-                    print("   Checking for a popup to close...")
-                    dismiss_close_popup(driver, wait, timeout=6)
-
-                    # === Daily coins button ===
-                    print("   Looking for 'Daily coins' button...")
-                    daily_xpaths = [
-                        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'daily coin')]",
-                        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'daily coin')]",
-                        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
-                        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
-                        "//*[@role='button'][contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'dailycoin')]",
-                    ]
-                    daily_btn, _ = find_in_page_or_frames(driver, wait, daily_xpaths, timeout=15)
-                    if daily_btn is None:
-                        raise TimeoutException("Could not locate 'Daily coins' button")
-
-                    robust_click(driver, daily_btn)
-                    print("   ✅ Clicked 'Daily coins'!")
-
-                    # Give the popup time to animate/render fully.
-                    time.sleep(4)
-
-                    # === Sign In (inside popup, possibly inside an iframe) ===
-                    sign_xpaths = [
-                        "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
-                        "//*[@role='button'][contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
-                        "//a[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
-                        "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]",
-                    ]
-
-                    sign_btn, frame_ctx = find_in_page_or_frames(driver, wait, sign_xpaths, timeout=12)
-
-                    if sign_btn is None:
-                        # Save diagnostics so you can see exactly what the popup looked like.
-                        shot_path = os.path.join(debug_dir, f"popup_not_found_{num}.png")
-                        html_path = os.path.join(debug_dir, f"popup_not_found_{num}.html")
-                        driver.switch_to.default_content()
-                        driver.save_screenshot(shot_path)
-                        with open(html_path, "w", encoding="utf-8") as hf:
-                            hf.write(driver.page_source)
-                        raise TimeoutException(
-                            f"Could not locate 'Sign In' button. Saved {shot_path} and {html_path} for inspection."
-                        )
-
-                    # If the element was in an iframe, driver context is already
-                    # switched into that frame by find_in_page_or_frames since it
-                    # only switches back to default on failure paths.
-                    success = robust_click(driver, sign_btn)
+                    driver = start_driver()
+                    wait = WebDriverWait(driver, 15)
+                except Exception as restart_err:
+                    print(f"   ❌ Failed to restart browser: {restart_err}")
+            except Exception as e:
+                print(f"   ❌ Error for {num}: {type(e).__name__}: {e}")
+                executor.shutdown(wait=False)
+                try:
                     driver.switch_to.default_content()
-
-                    if not success:
-                        raise ElementClickInterceptedException("Sign In click failed after all fallback strategies")
-
-                    print("   ✅ Clicked Sign In!")
-                    succeeded = True
-                    break  # done with this number, no need to retry further
-
-                except Exception as e:
-                    print(f"   ❌ Error for {num} (attempt {attempt}/{max_attempts}): {type(e).__name__}: {e}")
-                    try:
-                        driver.switch_to.default_content()
-                        driver.save_screenshot(os.path.join(debug_dir, f"error_{num}_attempt{attempt}.png"))
-                    except Exception:
-                        pass
-                    time.sleep(3)  # brief pause before retrying
-
-            if not succeeded:
-                print(f"   ⚠️ Giving up on {num} after {max_attempts} failed attempts.")
+                    driver.save_screenshot(os.path.join(debug_dir, f"error_{num}.png"))
+                except Exception:
+                    pass
 
         print("\n✅ All done!")
         return "Automation completed successfully!"
@@ -330,4 +363,4 @@ def run_automation(target_url, numbers_file):
         return f"Critical Error: {e}"
     finally:
         if driver:
-            driver.quit()
+            safe_quit(driver)
