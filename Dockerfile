@@ -39,10 +39,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Render provides the PORT env var; gunicorn binds to it.
-# --timeout 0 disables gunicorn's worker timeout entirely. This app runs a
-# long background automation thread inside the same worker process - if that
-# thread's blocking Selenium/network calls ever hold Python's GIL long enough,
-# gunicorn's internal health-check can't get through, and with a timeout set
-# it will silently kill and restart the ENTIRE process (wiping out the
-# automation with zero error logged). Disabling it removes that risk.
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 0 --enable-stdio-inheritance app:app
+# --timeout 0 disables gunicorn's own worker timeout (see note below).
+# --worker-class gthread --threads 4 means this worker can handle multiple
+# things at once (e.g. answer a health-check ping) even while one thread is
+# busy running the long Selenium automation loop. With the default sync
+# worker, the whole process is blocked by that one busy thread and can't
+# respond to anything else - including Render's own external health checks -
+# which can cause Render to think the service is unresponsive and restart
+# the whole container, wiping out the automation with zero error logged.
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 0 --worker-class gthread --threads 4 --workers 1 --enable-stdio-inheritance app:app

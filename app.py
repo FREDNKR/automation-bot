@@ -8,10 +8,18 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Signals the running automation to stop between numbers.
+stop_event = threading.Event()
+
 
 @app.route("/")
 def home():
     return render_template("index.html")
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/run", methods=["POST"])
@@ -29,9 +37,11 @@ def run():
 
     url = request.form.get("url", "https://www.luckywin.com.gh/login")
 
+    stop_event.clear()  # reset in case a previous run was stopped
+
     def run_task():
         try:
-            result = run_automation(url, file_path)
+            result = run_automation(url, file_path, stop_event)
             print(result)
         except Exception as e:
             import traceback
@@ -42,6 +52,12 @@ def run():
     thread.start()
 
     return jsonify({"status": "✅ Automation started using uploaded file!"})
+
+
+@app.route("/stop", methods=["POST"])
+def stop():
+    stop_event.set()
+    return jsonify({"status": "🛑 Stop signal sent. It will stop after the current number finishes."})
 
 
 if __name__ == "__main__":
