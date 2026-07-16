@@ -38,5 +38,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Render provides the PORT env var; gunicorn binds to it
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 120 --enable-stdio-inheritance app:app
+# Render provides the PORT env var; gunicorn binds to it.
+# --timeout 0 disables gunicorn's worker timeout entirely. This app runs a
+# long background automation thread inside the same worker process - if that
+# thread's blocking Selenium/network calls ever hold Python's GIL long enough,
+# gunicorn's internal health-check can't get through, and with a timeout set
+# it will silently kill and restart the ENTIRE process (wiping out the
+# automation with zero error logged). Disabling it removes that risk.
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 0 --enable-stdio-inheritance app:app
