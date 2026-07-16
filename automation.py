@@ -293,7 +293,7 @@ def process_one_number(driver, wait, target_url, num, debug_dir):
     print("   ✅ Clicked Sign In!")
 
 
-def run_automation(target_url, numbers_file):
+def run_automation(target_url, numbers_file, stop_event=None):
     driver = None
     debug_dir = "debug_output"
     os.makedirs(debug_dir, exist_ok=True)
@@ -310,6 +310,10 @@ def run_automation(target_url, numbers_file):
             numbers = [line.strip() for line in f if line.strip()]
 
         for i, num in enumerate(numbers, 1):
+            if stop_event is not None and stop_event.is_set():
+                print(f"\n🛑 Stop requested. Halting after {i - 1}/{len(numbers)} numbers.")
+                break
+
             print(f"\n[{i}/{len(numbers)}] Processing: {num}")
 
             # Periodically restart the browser to release accumulated RAM/CPU,
