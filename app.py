@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import threading
 import os
-import uuid
 from automation import run_automation
 
 app = Flask(__name__)
@@ -9,12 +8,14 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-MAX_CONCURRENT_RUNS = 3
+# Signals the running automation to stop between numbers.
+stop_event = threading.Event()
 
-# Tracks all active/finished jobs by ID:
-# { job_id: {"stop_event": Event, "running": bool, "url": str} }
-jobs = {}
-jobs_lock = threading.Lock()
+# Tracks whether an automation run is currently in progress, so a second
+# run can't be started on top of it (running two Chrome browsers at once
+# competes for the same CPU/RAM and can crash both).
+is_running = False
+run_lock = threading.Lock()
 
 
 @app.route("/")
@@ -29,88 +30,59 @@ def health():
 
 @app.route("/run", methods=["POST"])
 def run():
-    with jobs_lock:
-        active_count = sum(1 for j in jobs.values() if j["running"])
-        if active_count >= MAX_CONCURRENT_RUNS:
+    global is_running
+
+    with run_lock:
+        if is_running:
             return jsonify({
-                "status": f"⚠️ Maximum of {MAX_CONCURRENT_RUNS} automations already running. "
-                           f"Wait for one to finish or stop it first."
+                "status": "⚠️ An automation is already running. Please wait for it to finish or stop it first."
             }), 409
+        is_running = True
 
     if 'file' not in request.files:
+        is_running = False
         return jsonify({"status": "Error: No file uploaded"}), 400
 
     file = request.files['file']
     if file.filename == '':
+        is_running = False
         return jsonify({"status": "Error: No file selected"}), 400
 
-    job_id = uuid.uuid4().hex[:8]
-
-    # Each job gets its own numbers file so concurrent runs don't overwrite each other.
-    file_path = os.path.join(UPLOAD_FOLDER, f"numbers_{job_id}.txt")
+    # Save uploaded file as numbers.txt (accepts any original name)
+    file_path = os.path.join(UPLOAD_FOLDER, "numbers.txt")
     file.save(file_path)
 
     url = request.form.get("url", "https://www.luckywin.com.gh/login")
 
-    stop_event = threading.Event()
-
-    with jobs_lock:
-        jobs[job_id] = {"stop_event": stop_event, "running": True, "url": url}
+    stop_event.clear()  # reset in case a previous run was stopped
 
     def run_task():
+        global is_running
         try:
             result = run_automation(url, file_path, stop_event)
-            print(f"[{job_id}] {result}")
+            print(result)
         except Exception as e:
             import traceback
-            print(f"❌ [{job_id}] Automation crashed: {e}")
+            print(f"❌ Automation crashed: {e}")
             traceback.print_exc()
         finally:
-            with jobs_lock:
-                jobs[job_id]["running"] = False
+            is_running = False
 
     thread = threading.Thread(target=run_task)
     thread.start()
 
-    return jsonify({
-        "status": f"✅ Automation started! Job ID: {job_id}",
-        "job_id": job_id
-    })
+    return jsonify({"status": "✅ Automation started using uploaded file!"})
 
 
 @app.route("/stop", methods=["POST"])
 def stop():
-    job_id = request.json.get("job_id") if request.is_json else request.form.get("job_id")
-
-    with jobs_lock:
-        if not job_id:
-            # No job_id given: stop everything currently running.
-            if not jobs:
-                return jsonify({"status": "No automations are running."})
-            for j in jobs.values():
-                j["stop_event"].set()
-            return jsonify({"status": "🛑 Stop signal sent to all running automations."})
-
-        if job_id not in jobs:
-            return jsonify({"status": f"⚠️ No job found with ID {job_id}"}), 404
-
-        jobs[job_id]["stop_event"].set()
-        return jsonify({"status": f"🛑 Stop signal sent to job {job_id}."})
+    stop_event.set()
+    return jsonify({"status": "🛑 Stop signal sent. It will stop after the current number finishes."})
 
 
 @app.route("/status")
 def status():
-    with jobs_lock:
-        active_count = sum(1 for j in jobs.values() if j["running"])
-        job_list = [
-            {"job_id": jid, "running": j["running"], "url": j["url"]}
-            for jid, j in jobs.items()
-        ]
-    return jsonify({
-        "active_count": active_count,
-        "max_concurrent": MAX_CONCURRENT_RUNS,
-        "jobs": job_list
-    })
+    return jsonify({"running": is_running})
 
 
 if __name__ == "__main__":
