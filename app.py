@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import threading
 import os
+import sys
 from automation import run_automation
 
 app = Flask(__name__)
@@ -16,6 +17,33 @@ stop_event = threading.Event()
 # competes for the same CPU/RAM and can crash both).
 is_running = False
 run_lock = threading.Lock()
+
+# --- Live log capture -------------------------------------------------
+# Every print() call inside run_automation() gets mirrored into this list
+# so the frontend can poll /logs and show live output.
+log_lines = []
+log_lock = threading.Lock()
+
+
+class LogCapture:
+    """Wraps stdout so every printed line is (a) still printed normally
+    and (b) appended to log_lines for the /logs endpoint to serve."""
+
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self.buffer = ""
+
+    def write(self, message):
+        self.original_stream.write(message)
+        self.buffer += message
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            if line.strip():
+                with log_lock:
+                    log_lines.append(line)
+
+    def flush(self):
+        self.original_stream.flush()
 
 
 @app.route("/")
@@ -56,8 +84,14 @@ def run():
 
     stop_event.clear()  # reset in case a previous run was stopped
 
+    # clear old logs so this run starts with a fresh log box
+    with log_lock:
+        log_lines.clear()
+
     def run_task():
         global is_running
+        original_stdout = sys.stdout
+        sys.stdout = LogCapture(original_stdout)
         try:
             result = run_automation(url, file_path, stop_event)
             print(result)
@@ -66,6 +100,7 @@ def run():
             print(f"❌ Automation crashed: {e}")
             traceback.print_exc()
         finally:
+            sys.stdout = original_stdout
             is_running = False
 
     thread = threading.Thread(target=run_task)
@@ -83,6 +118,19 @@ def stop():
 @app.route("/status")
 def status():
     return jsonify({"running": is_running})
+
+
+@app.route("/logs")
+def get_logs():
+    with log_lock:
+        return jsonify(log_lines)
+
+
+@app.route("/logs/clear", methods=["POST"])
+def clear_logs():
+    with log_lock:
+        log_lines.clear()
+    return jsonify({"status": "cleared"})
 
 
 if __name__ == "__main__":
