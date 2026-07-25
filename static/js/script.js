@@ -51,3 +51,24 @@ stopBtn.onclick = function() {
     statusEl.textContent = "Stopped";
     progressBar.style.width = "0%";
 };
+let logPollInterval = null;
+
+function pollLogs() {
+    fetch('/logs')
+        .then(res => res.json())
+        .then(lines => {
+            const box = document.getElementById('logBox');
+            box.textContent = lines.join('\n');
+            box.scrollTop = box.scrollHeight;
+        })
+        .catch(err => console.error('log fetch failed', err));
+}
+
+function startLogPolling() {
+    fetch('/logs/clear', { method: 'POST' });
+    logPollInterval = setInterval(pollLogs, 1000);
+}
+
+function stopLogPolling() {
+    if (logPollInterval) clearInterval(logPollInterval);
+}

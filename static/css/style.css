@@ -71,3 +71,14 @@ button:hover {
     background: #22c55e;
     transition: width 0.4s ease;
 }
+.log-box {
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 12px;
+    border-radius: 8px;
+    height: 220px;
+    overflow-y: auto;
+    font-size: 13px;
+    white-space: pre-wrap;
+    border: 1px solid #333;
+}
